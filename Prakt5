@@ -1,0 +1,126 @@
+import multiprocessing
+import random
+import time
+import os
+import psutil
+import getpass
+from datetime import datetime
+
+
+def logger(log_queue):
+    username = getpass.getuser()
+    while True:
+        message = log_queue.get()
+        if message == "STOP":
+            break
+        
+        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        with open("sort.log", "a", encoding="utf-8") as f:
+            f.write(f"[{message[0]}] [{now}] [{username}] - {message[1]}\n")
+
+
+def get_process_count():
+    cores = os.cpu_count() or 1
+    cpu_usage = psutil.cpu_percent(interval=1)
+    available = max(1, int(cores * (1 - cpu_usage/100)))
+    return min(available, cores)
+
+
+def merge(left, right):
+    result = []
+    i = j = 0
+    
+    while i < len(left) and j < len(right):
+        if left[i] < right[j]:
+            result.append(left[i])
+            i += 1
+        else:
+            result.append(right[j])
+            j += 1
+    
+    result += left[i:]
+    result += right[j:]
+    return result
+
+
+def merge_sort(args):
+    arr, log_queue = args
+    if log_queue:
+        log_queue.put(("INFO", "Сортировка части массива"))
+    
+    if len(arr) <= 1:
+        return arr
+    
+    mid = len(arr) // 2
+    left = merge_sort((arr[:mid], log_queue))
+    right = merge_sort((arr[mid:], log_queue))
+    return merge(left, right)
+
+
+def parallel_sort(arr, processes, log_queue=None):
+    if log_queue:
+        log_queue.put(("INFO", f"Начало сортировки с {processes} процессами"))
+
+    chunk_size = len(arr) // processes
+    chunks = [arr[i*chunk_size : (i+1)*chunk_size] for i in range(processes-1)]
+    chunks.append(arr[(processes-1)*chunk_size:])
+
+    with multiprocessing.Pool(processes) as pool:
+        sorted_chunks = pool.map(merge_sort, [(chunk, log_queue) for chunk in chunks])
+
+    while len(sorted_chunks) > 1:
+        merged = []
+        for i in range(0, len(sorted_chunks), 2):
+            if i+1 < len(sorted_chunks):
+                merged.append(merge(sorted_chunks[i], sorted_chunks[i+1]))
+            else:
+                merged.append(sorted_chunks[i])
+        sorted_chunks = merged
+    
+    return sorted_chunks[0]
+
+
+def main():
+    manager = multiprocessing.Manager()
+    log_queue = manager.Queue()
+    
+    logger_proc = multiprocessing.Process(target=logger, args=(log_queue,))
+    logger_proc.start()
+    
+    try:
+        log_queue.put(("INFO", "Программа запущена"))
+        
+        n = int(input("Введите количество элементов: "))
+        log_queue.put(("INFO", f"Введено {n} элементов"))
+        
+        recommended = get_process_count()
+        print(f"\nРекомендуется процессов: {recommended}")
+        processes = int(input(f"Введите количество процессов (1-{recommended}): "))
+        
+        if not 1 <= processes <= recommended:
+            raise ValueError("Неверное количество процессов")
+        
+        log_queue.put(("INFO", f"Используется {processes} процессов"))
+        
+        arr = [random.randint(0, 100000) for _ in range(n)]
+        print(f"\nПервые 10 элементов: {arr[:10]}...")
+        
+        start = time.time()
+        sorted_arr = parallel_sort(arr, processes, log_queue)
+        end = time.time()
+        
+        print(f"Отсортировано (первые 10): {sorted_arr[:10]}...")
+        print(f"Время: {end - start:.4f} сек")
+        
+    except Exception as e:
+        print(f"\nОшибка: {e}")
+        log_queue.put(("ERROR", f"Ошибка: {e}"))
+    
+    finally:
+        log_queue.put(("INFO", "Завершение"))
+        log_queue.put("STOP")
+        logger_proc.join()
+
+
+if __name__ == "__main__":
+    main()
