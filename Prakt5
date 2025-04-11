@@ -1,125 +1,163 @@
 import multiprocessing
 import random
 import time
+import getpass
 import os
 import psutil
-import getpass
 from datetime import datetime
 
 
-def logger(log_queue):
-    username = getpass.getuser()
-    while True:
-        message = log_queue.get()
-        if message == "STOP":
-            break
+class Logger:
+    def __init__(self, log_file='app.log'):
+        self.log_file = log_file
+        self.username = getpass.getuser()
         
-        now = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        with open("sort.log", "a", encoding="utf-8") as f:
-            f.write(f"[{message[0]}] [{now}] [{username}] - {message[1]}\n")
+    def log(self, level, message):
+        timestamp = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        log_entry = f"[{level}] [{timestamp}] [{self.username}] - {message}\n"
+        
+        with open(self.log_file, 'a') as f:
+            f.write(log_entry)
 
 
-def get_process_count():
-    cores = os.cpu_count() or 1
-    cpu_usage = psutil.cpu_percent(interval=1)
-    available = max(1, int(cores * (1 - cpu_usage/100)))
-    return min(available, cores)
+def bubble_sort(arr):
+    n = len(arr)
+    for i in range(n):
+        for j in range(0, n-i-1):
+            if arr[j] > arr[j+1]:
+                arr[j], arr[j+1] = arr[j+1], arr[j]
+    return arr
 
 
-def merge(left, right):
+def merge_sorted_arrays(arrays):
     result = []
-    i = j = 0
+    pointers = [0] * len(arrays)
     
-    while i < len(left) and j < len(right):
-        if left[i] < right[j]:
-            result.append(left[i])
-            i += 1
-        else:
-            result.append(right[j])
-            j += 1
+    while True:
+        min_val = None
+        min_idx = -1
+        
+        for i in range(len(arrays)):
+            if pointers[i] < len(arrays[i]):
+                current = arrays[i][pointers[i]]
+                if min_val is None or current < min_val:
+                    min_val = current
+                    min_idx = i
+        
+        if min_idx == -1:
+            break
+            
+        result.append(min_val)
+        pointers[min_idx] += 1
     
-    result += left[i:]
-    result += right[j:]
     return result
 
 
-def merge_sort(args):
-    arr, log_queue = args
-    if log_queue:
-        log_queue.put(("INFO", "Сортировка части массива"))
-    
-    if len(arr) <= 1:
-        return arr
-    
-    mid = len(arr) // 2
-    left = merge_sort((arr[:mid], log_queue))
-    right = merge_sort((arr[mid:], log_queue))
-    return merge(left, right)
+def sort_worker(arr, result_queue, logger):
+    try:
+        logger.log("INFO", "Начата сортировка части массива")
+        sorted_arr = bubble_sort(arr)
+        result_queue.put(sorted_arr)
+        logger.log("INFO", "Сортировка части массива завершена")
+    except Exception as e:
+        logger.log("ERROR", f"Ошибка при сортировке: {str(e)}")
+        result_queue.put(None)
 
 
-def parallel_sort(arr, processes, log_queue=None):
-    if log_queue:
-        log_queue.put(("INFO", f"Начало сортировки с {processes} процессами"))
+def save_worker(result_queue, save_queue, logger):
+    try:
+        while True:
+            if not result_queue.empty():
+                result = result_queue.get()
+                if result is None: 
+                    break
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"sorted_part_{timestamp}.txt"
+                with open(filename, 'w') as f:
+                    f.write(','.join(map(str, result)))
+                logger.log("INFO", f"Сохранен результат в файл {filename}")
+                save_queue.put(filename)
+            time.sleep(0.1)
+    except Exception as e:
+        logger.log("ERROR", f"Ошибка в процессе сохранения: {str(e)}")
 
-    chunk_size = len(arr) // processes
-    chunks = [arr[i*chunk_size : (i+1)*chunk_size] for i in range(processes-1)]
-    chunks.append(arr[(processes-1)*chunk_size:])
 
-    with multiprocessing.Pool(processes) as pool:
-        sorted_chunks = pool.map(merge_sort, [(chunk, log_queue) for chunk in chunks])
+def get_available_processes():
+    total_cores = os.cpu_count()
+    cpu_percent = psutil.cpu_percent(interval=1)
+    available_ratio = (100 - cpu_percent) / 100
+    available_processes = int(total_cores * available_ratio)
 
-    while len(sorted_chunks) > 1:
-        merged = []
-        for i in range(0, len(sorted_chunks), 2):
-            if i+1 < len(sorted_chunks):
-                merged.append(merge(sorted_chunks[i], sorted_chunks[i+1]))
-            else:
-                merged.append(sorted_chunks[i])
-        sorted_chunks = merged
-    
-    return sorted_chunks[0]
+    return max(1, min(available_processes, total_cores))
 
 
 def main():
-    manager = multiprocessing.Manager()
-    log_queue = manager.Queue()
-    
-    logger_proc = multiprocessing.Process(target=logger, args=(log_queue,))
-    logger_proc.start()
+    logger = Logger()
     
     try:
-        log_queue.put(("INFO", "Программа запущена"))
+        logger.log("INFO", "Программа запущена")
+
+        n = int(input("Введите количество элементов в массиве: "))
+        logger.log("INFO", f"Пользователь ввел размер массива: {n}")
+
+        arr = [random.randint(0, 1000) for _ in range(n)]
+
+        available_processes = get_available_processes()
+        max_processes = min(available_processes, os.cpu_count())
         
-        n = int(input("Введите количество элементов: "))
-        log_queue.put(("INFO", f"Введено {n} элементов"))
+        print(f"Доступно процессов: {max_processes} (из {os.cpu_count()})")
+        num_processes = int(input(f"Введите количество процессов для сортировки (1-{max_processes}): "))
         
-        recommended = get_process_count()
-        print(f"\nРекомендуется процессов: {recommended}")
-        processes = int(input(f"Введите количество процессов (1-{recommended}): "))
+        if num_processes < 1 or num_processes > max_processes:
+            raise ValueError("Недопустимое количество процессов")
+            
+        logger.log("INFO", f"Пользователь выбрал {num_processes} процессов для сортировки")
+
+        chunk_size = n // num_processes
+        chunks = [arr[i*chunk_size:(i+1)*chunk_size] for i in range(num_processes-1)]
+        chunks.append(arr[(num_processes-1)*chunk_size:])
+
+        result_queue = multiprocessing.Queue()
+        save_queue = multiprocessing.Queue()
+
+        processes = []
+        for chunk in chunks:
+            p = multiprocessing.Process(target=sort_worker, args=(chunk, result_queue, Logger()))
+            processes.append(p)
+            p.start()
+
+        saver = multiprocessing.Process(target=save_worker, args=(result_queue, save_queue, Logger()))
+        saver.start()
+
+        for p in processes:
+            p.join()
+
+        result_queue.put(None)
+        saver.join()
+
+        sorted_chunks = []
+        while not result_queue.empty():
+            chunk = result_queue.get()
+            if chunk is not None:
+                sorted_chunks.append(chunk)
+
+        final_sorted = merge_sorted_arrays(sorted_chunks)
+
+        with open('final_sorted.txt', 'w') as f:
+            f.write(','.join(map(str, final_sorted)))
         
-        if not 1 <= processes <= recommended:
-            raise ValueError("Неверное количество процессов")
+        logger.log("INFO", "Финальный отсортированный массив сохранен в final_sorted.txt")
+        print("Сортировка завершена. Результат сохранен в final_sorted.txt")
         
-        log_queue.put(("INFO", f"Используется {processes} процессов"))
-        
-        arr = [random.randint(0, 100000) for _ in range(n)]
-        print(f"\nПервые 10 элементов: {arr[:10]}...")
-        
-        start = time.time()
-        sorted_arr = parallel_sort(arr, processes, log_queue)
-        end = time.time()
-        
-        print(f"Отсортировано (первые 10): {sorted_arr[:10]}...")
-        print(f"Время: {end - start:.4f} сек")
-        
+    except ValueError as ve:
+        logger.log("ERROR", f"Ошибка ввода: {str(ve)}")
+        print(f"Ошибка: {str(ve)}")
     except Exception as e:
-        print(f"\nОшибка: {e}")
-        log_queue.put(("ERROR", f"Ошибка: {e}"))
-    
+        logger.log("ERROR", f"Неожиданная ошибка: {str(e)}")
+        print(f"Произошла ошибка: {str(e)}")
     finally:
-        log_queue.put(("INFO", "Завершение"))
-        log_queue.put("STOP")
-        logger_proc.join()
+        logger.log("INFO", "Программа завершена")
 
 
 if __name__ == "__main__":
